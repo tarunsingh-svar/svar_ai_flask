@@ -16,8 +16,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("FlaskApp")
 
-logger.debug("🚀 Flask starting...")
+logger.debug("🚀 Flask starting…")
 logger.debug(f"🔑 OPENAI Key Found: {bool(os.getenv('OPENAI_API_KEY'))}")
+logger.debug(f"🔑 SARVAM Key Found: {bool(os.getenv('SARVAM_API_KEY'))}")
 
 app = Flask(__name__)
 
@@ -38,16 +39,15 @@ def summarize_text():
         logger.error("❌ Missing `text` param")
         return jsonify({"error": "Missing text param"}), 400
 
-    logger.debug(f"📩 Summarize Input: {text[:200]}")
+    logger.debug(f"📩 Input: {text[:200]}")
     prompt = f"Summarize clearly:\n{text.strip()}"
 
     try:
         result = generate_text(prompt)
-        logger.debug(f"📤 Summary Output: {result[:200]}")
+        logger.debug(f"📤 Output: {result[:200]}")
         return jsonify({"summary": result})
-
     except Exception as e:
-        logger.error(f"💥 Summarize failed: {str(e)}")
+        logger.error(f"💥 Summarize error: {e}")
         logger.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
@@ -63,66 +63,76 @@ def transcribe_audio():
         return jsonify({"error": "file missing"}), 400
 
     file = request.files["file"]
-    logger.debug(f"📎 File Received: {file.filename}, MIME: {file.mimetype}")
+    logger.debug(f"📎 File Received: {file.filename} | {file.mimetype}")
 
     try:
         transcript = transcribe_audio_file(file)
         elapsed = round(time.time() - start, 2)
 
-        logger.info(f"✅ Transcription done in {elapsed}s")
+        logger.info(f"✅ Done in {elapsed}s")
         logger.debug(f"📤 Transcript: {transcript[:200]}")
-
         return jsonify({"transcript": transcript})
 
     except Exception as e:
-        logger.error(f"💥 Transcription failed: {str(e)}")
+        logger.error(f"💥 Transcription error: {e}")
         logger.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 
-# ✅ Text generation helper endpoints
-def gen(prompt_title, text):
-    logger.info(f"✨ {prompt_title} generation")
-    logger.debug(f"Input: {text[:150]}")
-    return generate_text(text)
+# ✅ Generic generator helper
+def gen(title, prompt_text):
+    logger.info(f"✨ {title} API hit")
+    logger.debug(f"📥 Input: {prompt_text[:200]}")
+
+    result = generate_text(prompt_text)
+
+    logger.debug(f"📤 Output: {result[:200]}")
+    return result
 
 
 @app.route("/generate_x_post", methods=["POST"])
 def generate_x_post():
     text = request.json.get("text", "")
-    return jsonify({"result": gen("X Post", f"Write an engaging X post:\n{text}")})
+    result = gen("X Post", f"Write an engaging Twitter/X post:\n{text}")
+    return jsonify({"result": result})
 
 
 @app.route("/generate_x_thread", methods=["POST"])
 def generate_x_thread():
     text = request.json.get("text", "")
-    return jsonify({"result": gen("X Thread", f"Make a short X thread in points:\n{text}")})
+    result = gen("X Thread", f"Write a short threaded post:\n{text}")
+    return jsonify({"result": result})
 
 
 @app.route("/generate_facebook_post", methods=["POST"])
 def generate_facebook_post():
     text = request.json.get("text", "")
-    return jsonify({"result": gen("Facebook Post", f"Friendly Facebook post:\n{text}")})
+    result = gen("Facebook Post", f"Friendly Facebook post:\n{text}")
+    return jsonify({"result": result})
 
 
 @app.route("/generate_linkedin_post", methods=["POST"])
 def generate_linkedin_post():
     text = request.json.get("text", "")
-    return jsonify({"result": gen("LinkedIn Post", f"Professional LinkedIn post:\n{text}")})
+    result = gen("LinkedIn Post", f"Professional LinkedIn post:\n{text}")
+    return jsonify({"result": result})
 
 
 @app.route("/generate_meeting_notes", methods=["POST"])
 def generate_meeting_notes():
     text = request.json.get("text", "")
-    return jsonify({"result": gen("Meeting Notes", f"Proper meeting notes:\n{text}")})
+    result = gen("Meeting Notes", f"Write meeting notes:\n{text}")
+    return jsonify({"result": result})
 
 
 @app.route("/generate_journal", methods=["POST"])
 def generate_journal():
     text = request.json.get("text", "")
-    return jsonify({"result": gen("Journal", f"Journal entry:\n{text}")})
+    result = gen("Journal Entry", f"Write a short personal journal entry:\n{text}")
+    return jsonify({"result": result})
 
 
+# ✅ Server launcher
 if __name__ == "__main__":
-    logger.info("🚀 Flask server running on port 5000")
+    logger.info("🚀 Server running on port 5000")
     app.run(host="0.0.0.0", port=5000, debug=True)
