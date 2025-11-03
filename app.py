@@ -6,133 +6,154 @@ import logging
 import traceback
 import time
 
-# ✅ Load env file
 load_dotenv()
 
-# ✅ Logging setup
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("FlaskApp")
 
-logger.debug("🚀 Flask starting…")
-logger.debug(f"🔑 OPENAI Key Found: {bool(os.getenv('OPENAI_API_KEY'))}")
-logger.debug(f"🔑 SARVAM Key Found: {bool(os.getenv('SARVAM_API_KEY'))}")
-
 app = Flask(__name__)
 
 
 @app.route("/", methods=["GET"])
 def home():
-    logger.info("🏠 Home endpoint hit")
     return "✅ Flask AI API Running!"
 
 
-# ✅ Summarize API
 @app.route("/summarize", methods=["GET"])
 def summarize_text():
     text = request.args.get("text")
-    logger.info("📝 /summarize endpoint hit")
-
     if not text:
-        logger.error("❌ Missing `text` param")
         return jsonify({"error": "Missing text param"}), 400
 
-    logger.debug(f"📩 Input: {text[:200]}")
-    prompt = f"Summarize clearly:\n{text.strip()}"
-
-    try:
-        result = generate_text(prompt)
-        logger.debug(f"📤 Output: {result[:200]}")
-        return jsonify({"summary": result})
-    except Exception as e:
-        logger.error(f"💥 Summarize error: {e}")
-        logger.error(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+    result = generate_text(f"Summarize clearly:\n{text}")
+    return jsonify({"summary": result})
 
 
-# ✅ Transcribe API
 @app.route("/transcribe", methods=["POST"])
 def transcribe_audio():
-    start = time.time()
-    logger.info("🎧 /transcribe endpoint hit")
-
     if "file" not in request.files:
-        logger.error("❌ file missing")
         return jsonify({"error": "file missing"}), 400
 
-    file = request.files["file"]
-    logger.debug(f"📎 File Received: {file.filename} | {file.mimetype}")
-
-    try:
-        transcript = transcribe_audio_file(file)
-        elapsed = round(time.time() - start, 2)
-
-        logger.info(f"✅ Done in {elapsed}s")
-        logger.debug(f"📤 Transcript: {transcript[:200]}")
-        return jsonify({"transcript": transcript})
-
-    except Exception as e:
-        logger.error(f"💥 Transcription error: {e}")
-        logger.error(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+    transcript = transcribe_audio_file(request.files["file"])
+    return jsonify({"transcript": transcript})
 
 
-# ✅ Generic generator helper
-def gen(title, prompt_text):
-    logger.info(f"✨ {title} API hit")
-    logger.debug(f"📥 Input: {prompt_text[:200]}")
-
-    result = generate_text(prompt_text)
-
-    logger.debug(f"📤 Output: {result[:200]}")
+def gen(title, prompt):
+    logger.info(f"✨ {title} API")
+    result = generate_text(prompt)
     return result
 
 
+# =============== SOCIAL / CREATOR =================
 @app.route("/generate_x_post", methods=["POST"])
 def generate_x_post():
     text = request.json.get("text", "")
-    result = gen("X Post", f"Write an engaging Twitter/X post:\n{text}")
-    return jsonify({"result": result})
+    return jsonify({"result": gen("X Post", f"Engaging X Post:\n{text}")})
 
 
 @app.route("/generate_x_thread", methods=["POST"])
 def generate_x_thread():
     text = request.json.get("text", "")
-    result = gen("X Thread", f"Write a short threaded post:\n{text}")
-    return jsonify({"result": result})
+    return jsonify({"result": gen("X Thread", f"Write short threaded tweets:\n{text}")})
 
 
 @app.route("/generate_facebook_post", methods=["POST"])
 def generate_facebook_post():
     text = request.json.get("text", "")
-    result = gen("Facebook Post", f"Friendly Facebook post:\n{text}")
-    return jsonify({"result": result})
+    return jsonify({"result": gen("FB Post", f"Friendly Facebook post:\n{text}")})
 
 
 @app.route("/generate_linkedin_post", methods=["POST"])
 def generate_linkedin_post():
     text = request.json.get("text", "")
-    result = gen("LinkedIn Post", f"Professional LinkedIn post:\n{text}")
-    return jsonify({"result": result})
+    return jsonify({"result": gen("LinkedIn Post", f"Professional LinkedIn post:\n{text}")})
+
+
+@app.route("/generate_video_script", methods=["POST"])
+def generate_video_script():
+    text = request.json.get("text", "")
+    return jsonify({"result": gen("Reel/TikTok Script", f"Attention grabbing video script:\n{text}")})
+
+
+@app.route("/generate_content_outline", methods=["POST"])
+def generate_content_outline():
+    text = request.json.get("text", "")
+    return jsonify({"result": gen("Content Outline", f"Structured outline:\n{text}")})
+
+
+# =============== PRODUCTIVITY =================
+@app.route("/generate_quick_list", methods=["POST"])
+def generate_quick_list():
+    text = request.json.get("text", "")
+    return jsonify({"result": gen("Quick List", f"Convert into short bullet list:\n{text}")})
+
+
+@app.route("/generate_todo_list", methods=["POST"])
+def generate_todo_list():
+    text = request.json.get("text", "")
+    return jsonify({"result": gen("To-do List", f"Actionable tasks list:\n{text}")})
 
 
 @app.route("/generate_meeting_notes", methods=["POST"])
 def generate_meeting_notes():
     text = request.json.get("text", "")
-    result = gen("Meeting Notes", f"Write meeting notes:\n{text}")
-    return jsonify({"result": result})
+    return jsonify({"result": gen("Meeting Notes", f"Clean meeting notes:\n{text}")})
 
 
+# =============== WORK COLLAB =================
+@app.route("/generate_daily_standup", methods=["POST"])
+def generate_daily_standup():
+    text = request.json.get("text", "")
+    return jsonify({"result": gen("Daily Standup", f"Classic daily standup format:\n{text}")})
+
+
+@app.route("/generate_feature_discussion", methods=["POST"])
+def generate_feature_discussion():
+    text = request.json.get("text", "")
+    return jsonify({"result": gen("Feature Discussion", f"Team feature discussion format:\n{text}")})
+
+
+@app.route("/generate_interview_summary", methods=["POST"])
+def generate_interview_summary():
+    text = request.json.get("text", "")
+    return jsonify({"result": gen("Interview Summary", f"Insights from user interview:\n{text}")})
+
+
+@app.route("/generate_delegation_note", methods=["POST"])
+def generate_delegation_note():
+    text = request.json.get("text", "")
+    return jsonify({"result": gen("Delegation Note", f"Delegate tasks clearly:\n{text}")})
+
+
+# =============== EMAILS =================
+@app.route("/generate_email_casual", methods=["POST"])
+def generate_email_casual():
+    text = request.json.get("text", "")
+    return jsonify({"result": gen("Casual Email", f"Friendly short email:\n{text}")})
+
+
+@app.route("/generate_email_formal", methods=["POST"])
+def generate_email_formal():
+    text = request.json.get("text", "")
+    return jsonify({"result": gen("Formal Email", f"Structured professional email:\n{text}")})
+
+
+# =============== LEARNING =================
+@app.route("/generate_lecture_summary", methods=["POST"])
+def generate_lecture_summary():
+    text = request.json.get("text", "")
+    return jsonify({"result": gen("Lecture Summary", f"Clear class/lecture summary:\n{text}")})
+
+
+# =============== JOURNALING =================
 @app.route("/generate_journal", methods=["POST"])
 def generate_journal():
     text = request.json.get("text", "")
-    result = gen("Journal Entry", f"Write a short personal journal entry:\n{text}")
-    return jsonify({"result": result})
+    return jsonify({"result": gen("Journal Entry", f"Short personal journal entry:\n{text}")})
 
 
-# ✅ Server launcher
 if __name__ == "__main__":
-    logger.info("🚀 Server running on port 5000")
     app.run(host="0.0.0.0", port=5000, debug=True)
