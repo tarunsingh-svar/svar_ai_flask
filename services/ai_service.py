@@ -75,17 +75,25 @@ def transcribe_audio_file(file):
         for e in entries:
             speaker = e.get("speaker_id", "Speaker").replace("_"," ").title()
 
-            # ✅ Hinglish key extraction
-            trans_obj = e.get("transcription_output", {}) \
-                        .get("transliterations", {}) \
-                        .get("en", {})
+            # ✅ Hinglish first (en transliteration)
+            hinglish = (
+                e.get("transcription_output", {})
+                .get("transcriptions", {})
+                .get("hi-IN", {})
+                .get("transliterations", {})
+                .get("en", {})
+                .get("text", "")
+            )
 
-            text = trans_obj.get("text", "") or e.get("transcript", "")
+            # fallback to raw transcript if Hinglish missing
+            if not hinglish:
+                hinglish = e.get("transcript", "")
 
-            formatted_lines.append(f"{speaker}: {text}")
+            formatted_lines.append(f"Speaker {speaker}: {hinglish}")
 
         final_text = "\n".join(formatted_lines).strip()
         return final_text
+
 
     except Exception as e:
         logger.error(f"Sarvam Error: {e}")
