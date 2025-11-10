@@ -45,7 +45,7 @@ def transcribe_audio_file(file):
             shutil.copyfileobj(file.stream, f)
 
         job = sarvam_client.speech_to_text_job.create_job(
-            language_code="hi-IN",
+            # language_code="hi-IN",
             model="saarika:v2.5",
             with_diarization=True
         )
@@ -80,10 +80,11 @@ def transcribe_audio_file(file):
                 e.get("transcription_output", {})
                 .get("transcriptions", {})
                 .get("hi-IN", {})
-                .get("transliterations", {})
+                .get("transliteration", {})
                 .get("en", {})
                 .get("text", "")
             )
+
 
             # fallback to raw transcript if Hinglish missing
             if not hinglish:
