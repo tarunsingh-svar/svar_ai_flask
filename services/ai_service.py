@@ -32,7 +32,7 @@ def generate_text(prompt):
 
 
 def transcribe_audio_file(file):
-    logger.info("🎤 Sarvam transcription with Hinglish start")
+    logger.info("🎤 Sarvam transcription with English output start")
 
     temp_dir = "temp"
     out_dir = os.path.join(temp_dir, "out")
@@ -45,7 +45,6 @@ def transcribe_audio_file(file):
             shutil.copyfileobj(file.stream, f)
 
         job = sarvam_client.speech_to_text_job.create_job(
-            # language_code="hi-IN",
             model="saarika:v2.5",
             with_diarization=True
         )
@@ -68,15 +67,16 @@ def transcribe_audio_file(file):
 
         entries = res.get("diarized_transcript", {}).get("entries", [])
         if not entries:
+            # fallback if diarization not available
             txt = res.get("transcript", "")
             return txt.strip()
 
         formatted_lines = []
         for e in entries:
-            speaker = e.get("speaker_id", "Speaker").replace("_"," ").title()
+            speaker = e.get("speaker_id", "Speaker").replace("_", " ").title()
 
-            # ✅ Hinglish first (en transliteration)
-            hinglish = (
+            # 1️⃣ Try English transliteration (Hinglish)
+            english_text = (
                 e.get("transcription_output", {})
                 .get("transcriptions", {})
                 .get("hi-IN", {})
@@ -85,16 +85,23 @@ def transcribe_audio_file(file):
                 .get("text", "")
             )
 
+            # 2️⃣ Try if there’s already an English transcription
+            if not english_text:
+                english_text = (
+                    e.get("transcription_output", {})
+                    .get("transcriptions", {})
+                    .get("en-IN", {})
+                    .get("text", "")
+                )
 
-            # fallback to raw transcript if Hinglish missing
-            if not hinglish:
-                hinglish = e.get("transcript", "")
+            # 3️⃣ Fallback to original transcript if all else fails
+            if not english_text:
+                english_text = e.get("transcript", "")
 
-            formatted_lines.append(f"Speaker {speaker}: {hinglish}")
+            formatted_lines.append(f"Speaker {speaker}: {english_text}")
 
         final_text = "\n".join(formatted_lines).strip()
         return final_text
-
 
     except Exception as e:
         logger.error(f"Sarvam Error: {e}")
