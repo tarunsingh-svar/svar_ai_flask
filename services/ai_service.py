@@ -113,6 +113,51 @@ def generate_text(prompt):
         return "Error generating text"
 
 
+def generate_rewrite(config, transcript: str) -> str:
+    """Generate a structured rewrite using the given RewriteConfig.
+
+    The transcript is passed in full to support long recordings — GPT-5.4-nano
+    has a 400K context window so there is no practical ceiling. A 24K-character
+    soft cap (~6K tokens) is applied as a guard against unexpectedly oversized
+    payloads (e.g. multi-hour diarized sessions) that would slow the Render
+    cold-start path. Raise or remove this cap per-option when needed.
+    """
+    from services.rewrite_registry import SHARED_SYSTEM_PROMPT
+
+    if not transcript or not transcript.strip():
+        return "No transcript available to rewrite."
+
+    MAX_INPUT_CHARS = 24_000
+    trimmed = transcript.strip()
+    if len(trimmed) > MAX_INPUT_CHARS:
+        logger.warning(
+            f"generate_rewrite: transcript trimmed from {len(trimmed)} to "
+            f"{MAX_INPUT_CHARS} chars for rewrite_id={config.rewrite_id}"
+        )
+        trimmed = trimmed[:MAX_INPUT_CHARS]
+
+    user_message = (
+        f"Task: {config.task_instruction}\n\n"
+        f"Output format:\n{config.output_template}\n\n"
+        f"Transcript:\n---\n{trimmed}\n---"
+    )
+
+    try:
+        resp = _get_openai_client().chat.completions.create(
+            model="gpt-5.4-nano",
+            messages=[
+                {"role": "system", "content": SHARED_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            max_tokens=config.max_output_tokens,
+            temperature=config.temperature,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"generate_rewrite error [{config.rewrite_id}]: {e}")
+        return "Error generating rewrite"
+
+
 def transcribe_audio_file(file):
     temp_dir = "temp"
     out_dir = os.path.join(temp_dir, "out")
