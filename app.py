@@ -1,15 +1,14 @@
-from flask import Flask, request, jsonify
+from flask import Flask, g, request, jsonify
 from dotenv import load_dotenv
 from services.ai_service import (
     generate_text,
     generate_rewrite,
-    transcribe_audio_file,
     create_transcription_job,
+    create_transcription_job_from_url,
     get_transcription_job,
-    clear_transcription_job,
 )
+from services.auth import authenticate_request
 from services.rewrite_registry import REWRITE_CONFIGS
-import os
 import logging
 import traceback
 
@@ -23,9 +22,23 @@ logger = logging.getLogger("FlaskApp")
 
 app = Flask(__name__)
 
+# Routes reachable without a Supabase session. Everything else is authenticated
+# by the before_request hook below, so a new endpoint is private by default.
+PUBLIC_ENDPOINTS = {"home"}
+
+
+@app.before_request
+def enforce_authentication():
+    if request.method == "OPTIONS":
+        return None
+    if request.endpoint in PUBLIC_ENDPOINTS:
+        return None
+    return authenticate_request()
+
 
 @app.route("/", methods=["GET"])
 def home():
+    """Unauthenticated health check. Clients ping this to wake the dyno."""
     return "✅ Flask AI API Running!"
 
 
@@ -47,26 +60,53 @@ def summarize_text():
 
 @app.route("/transcribe", methods=["POST"])
 def transcribe_audio():
+    """Multipart upload path, used by the mobile app."""
     if "file" not in request.files:
         return jsonify({"error": "file missing"}), 400
 
     try:
-        job_id = create_transcription_job(request.files["file"])
+        job_id = create_transcription_job(g.user_id, request.files["file"])
         return jsonify({"job_id": job_id, "status": "pending"}), 202
     except Exception as e:
         logger.error(f"Failed to start transcription job: {e}")
         logger.error(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Could not start transcription."}), 500
+
+
+@app.route("/transcribe_url", methods=["POST"])
+def transcribe_audio_url():
+    """Storage-object path, used by the web app.
+
+    The browser uploads directly to Supabase Storage and sends a signed URL, so
+    the audio never passes through a serverless request body.
+    """
+    body = request.get_json(silent=True) or {}
+    audio_url = (body.get("audio_url") or "").strip()
+
+    if not audio_url.startswith("https://"):
+        return jsonify({"error": "audio_url missing or not https"}), 400
+
+    try:
+        job_id = create_transcription_job_from_url(g.user_id, audio_url)
+        return jsonify({"job_id": job_id, "status": "pending"}), 202
+    except Exception as e:
+        logger.error(f"Failed to start transcription job from url: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({"error": "Could not start transcription."}), 500
 
 
 @app.route("/transcribe/status/<job_id>", methods=["GET"])
 def transcribe_status(job_id):
-    job = get_transcription_job(job_id)
+    try:
+        job = get_transcription_job(job_id, g.user_id)
+    except Exception as e:
+        logger.error(f"Failed to read transcription job {job_id}: {e}")
+        return jsonify({"error": "Could not read the job status."}), 503
+
+    # Also covers jobs belonging to another user: the lookup is scoped by
+    # user_id, so someone else's job id is indistinguishable from a missing one.
     if job is None:
         return jsonify({"error": "job not found"}), 404
-
-    if job.get("status") in ("complete", "failed"):
-        clear_transcription_job(job_id)
 
     return jsonify(job)
 

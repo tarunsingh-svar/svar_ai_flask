@@ -5,10 +5,12 @@ import shutil
 import logging
 import traceback
 import threading
-import uuid
+import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
 from sarvamai import SarvamAI
+
+from services.job_store import create_job, get_job, update_job
 
 load_dotenv()
 logger = logging.getLogger("AI_Service")
@@ -16,68 +18,97 @@ logger = logging.getLogger("AI_Service")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
+# Guards against a malicious or accidental multi-gigabyte download.
+MAX_AUDIO_BYTES = 500 * 1024 * 1024
+
 _openai_client = None
 _sarvam_client = None
-_transcription_jobs = {}
-_transcription_jobs_lock = threading.Lock()
 
 
-def create_transcription_job(file_storage):
-    job_id = str(uuid.uuid4())
-    temp_dir = os.path.join("temp_jobs", job_id)
-    os.makedirs(temp_dir, exist_ok=True)
-    filename = file_storage.filename or "audio.m4a"
+class TranscriptionError(RuntimeError):
+    """Message is safe to show the user."""
+
+
+def _job_dir(job_id):
+    path = os.path.join("temp_jobs", job_id)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def create_transcription_job(user_id, file_storage):
+    """Starts a job from a direct multipart upload (used by the mobile app)."""
+    job_id = create_job(user_id)
+    temp_dir = _job_dir(job_id)
+    filename = os.path.basename(file_storage.filename or "audio.m4a")
     temp_audio_path = os.path.join(temp_dir, filename)
     file_storage.save(temp_audio_path)
 
-    with _transcription_jobs_lock:
-        _transcription_jobs[job_id] = {
-            "status": "pending",
-            "transcript": None,
-            "error": None,
-        }
+    _start_worker(job_id, temp_audio_path, temp_dir)
+    return job_id
 
+
+def create_transcription_job_from_url(user_id, audio_url):
+    """Starts a job from a Storage object (used by the web app).
+
+    The browser uploads straight to Supabase Storage, which sidesteps the 4.5 MB
+    serverless request body limit that a proxied upload would hit.
+    """
+    job_id = create_job(user_id)
+    temp_dir = _job_dir(job_id)
+
+    try:
+        temp_audio_path = _download_audio(audio_url, temp_dir)
+    except Exception as e:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        update_job(job_id, status="failed", error=str(e))
+        raise
+
+    _start_worker(job_id, temp_audio_path, temp_dir)
+    return job_id
+
+
+def _download_audio(audio_url, temp_dir):
+    extension = os.path.splitext(audio_url.split("?")[0])[1] or ".m4a"
+    destination = os.path.join(temp_dir, f"audio{extension}")
+
+    written = 0
+    with httpx.stream("GET", audio_url, timeout=120.0, follow_redirects=True) as response:
+        response.raise_for_status()
+        with open(destination, "wb") as handle:
+            for chunk in response.iter_bytes(chunk_size=1024 * 256):
+                written += len(chunk)
+                if written > MAX_AUDIO_BYTES:
+                    raise ValueError("That recording is too large to transcribe.")
+                handle.write(chunk)
+
+    if written == 0:
+        raise ValueError("The recording was empty.")
+
+    return destination
+
+
+def _start_worker(job_id, temp_audio_path, temp_dir):
     thread = threading.Thread(
         target=_run_transcription_job,
         args=(job_id, temp_audio_path, temp_dir),
         daemon=True,
     )
     thread.start()
-    return job_id
 
 
-def get_transcription_job(job_id):
-    with _transcription_jobs_lock:
-        job = _transcription_jobs.get(job_id)
-        if job is None:
-            return None
-        return dict(job)
-
-
-def clear_transcription_job(job_id):
-    with _transcription_jobs_lock:
-        _transcription_jobs.pop(job_id, None)
+def get_transcription_job(job_id, user_id):
+    return get_job(job_id, user_id)
 
 
 def _run_transcription_job(job_id, temp_audio_path, temp_dir):
     try:
-        with _transcription_jobs_lock:
-            if job_id in _transcription_jobs:
-                _transcription_jobs[job_id]["status"] = "processing"
-
+        update_job(job_id, status="processing")
         transcript = transcribe_audio_path(temp_audio_path)
-
-        with _transcription_jobs_lock:
-            if job_id in _transcription_jobs:
-                _transcription_jobs[job_id]["status"] = "complete"
-                _transcription_jobs[job_id]["transcript"] = transcript
+        update_job(job_id, status="complete", transcript=transcript)
     except Exception as e:
         logger.error(f"Transcription job {job_id} failed: {e}")
         logger.error(traceback.format_exc())
-        with _transcription_jobs_lock:
-            if job_id in _transcription_jobs:
-                _transcription_jobs[job_id]["status"] = "failed"
-                _transcription_jobs[job_id]["error"] = str(e)
+        update_job(job_id, status="failed", error=str(e))
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -191,13 +222,13 @@ def transcribe_audio_path(temp_audio_path):
         job.wait_until_complete()
 
         if job.is_failed():
-            return "Sarvam job failed"
+            raise TranscriptionError("The transcription provider rejected this recording.")
 
         job.download_outputs(out_dir)
 
         json_files = glob.glob(os.path.join(out_dir, "*.json"))
         if not json_files:
-            return "No transcript file from Sarvam"
+            raise TranscriptionError("No transcript was produced for this recording.")
 
         with open(json_files[0], "r", encoding="utf-8") as jf:
             res = json.load(jf)
@@ -240,10 +271,15 @@ def transcribe_audio_path(temp_audio_path):
         final_text = "\n".join(formatted_lines).strip()
         return final_text
 
+    except TranscriptionError:
+        raise
+
     except Exception as e:
+        # Raise rather than returning a sentinel string: the caller records job
+        # state, and a returned message would be saved as the user's transcript.
         logger.error(f"Sarvam Error: {e}")
         logger.error(traceback.format_exc())
-        return "Transcription error"
+        raise TranscriptionError("Transcription failed. Please try again.") from e
 
     finally:
         out_only = os.path.join(os.path.dirname(temp_audio_path), "out")
