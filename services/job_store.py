@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 
 import httpx
 
@@ -68,7 +69,7 @@ def create_job(user_id: str) -> str:
 def update_job(job_id: str, **fields) -> None:
     if not fields:
         return
-    fields["updated_at"] = "now()"
+    fields["updated_at"] = datetime.now(timezone.utc).isoformat()
     response = httpx.patch(
         f"{_endpoint()}?id=eq.{job_id}",
         headers=_headers(),
