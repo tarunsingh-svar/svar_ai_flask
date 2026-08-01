@@ -180,7 +180,7 @@ def generate_rewrite(config, transcript: str) -> str:
                 {"role": "system", "content": SHARED_SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
             ],
-            max_tokens=config.max_output_tokens,
+            max_completion_tokens=config.max_output_tokens,
             temperature=config.temperature,
         )
         return resp.choices[0].message.content.strip()
