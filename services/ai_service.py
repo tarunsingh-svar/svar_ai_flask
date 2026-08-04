@@ -1,6 +1,4 @@
 import os
-import json
-import glob
 import shutil
 import logging
 import traceback
@@ -8,25 +6,22 @@ import threading
 import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
-from sarvamai import SarvamAI
 
+from services import stt
 from services.job_store import create_job, get_job, update_job
+
+# Re-exported: this module was the historical home of the error type.
+from services.stt import TranscriptionError  # noqa: F401
 
 load_dotenv()
 logger = logging.getLogger("AI_Service")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
 # Guards against a malicious or accidental multi-gigabyte download.
 MAX_AUDIO_BYTES = 500 * 1024 * 1024
 
 _openai_client = None
-_sarvam_client = None
-
-
-class TranscriptionError(RuntimeError):
-    """Message is safe to show the user."""
 
 
 def _job_dir(job_id):
@@ -35,25 +30,29 @@ def _job_dir(job_id):
     return path
 
 
-def create_transcription_job(user_id, file_storage):
-    """Starts a job from a direct multipart upload (used by the mobile app)."""
-    job_id = create_job(user_id)
+def create_transcription_job(user_id, file_storage, language=None, locale=None):
+    """Starts a job from a direct multipart upload (used by the mobile app).
+
+    [language] is the user's Settings choice (None or "auto" to detect) and
+    [locale] is the device locale; together they pick the STT provider.
+    """
+    job_id = create_job(user_id, requested_language=language)
     temp_dir = _job_dir(job_id)
     filename = os.path.basename(file_storage.filename or "audio.m4a")
     temp_audio_path = os.path.join(temp_dir, filename)
     file_storage.save(temp_audio_path)
 
-    _start_worker(job_id, temp_audio_path, temp_dir)
+    _start_worker(job_id, temp_audio_path, temp_dir, language, locale)
     return job_id
 
 
-def create_transcription_job_from_url(user_id, audio_url):
+def create_transcription_job_from_url(user_id, audio_url, language=None, locale=None):
     """Starts a job from a Storage object (used by the web app).
 
     The browser uploads straight to Supabase Storage, which sidesteps the 4.5 MB
     serverless request body limit that a proxied upload would hit.
     """
-    job_id = create_job(user_id)
+    job_id = create_job(user_id, requested_language=language)
     temp_dir = _job_dir(job_id)
 
     try:
@@ -63,7 +62,7 @@ def create_transcription_job_from_url(user_id, audio_url):
         update_job(job_id, status="failed", error=str(e))
         raise
 
-    _start_worker(job_id, temp_audio_path, temp_dir)
+    _start_worker(job_id, temp_audio_path, temp_dir, language, locale)
     return job_id
 
 
@@ -87,10 +86,10 @@ def _download_audio(audio_url, temp_dir):
     return destination
 
 
-def _start_worker(job_id, temp_audio_path, temp_dir):
+def _start_worker(job_id, temp_audio_path, temp_dir, language=None, locale=None):
     thread = threading.Thread(
         target=_run_transcription_job,
-        args=(job_id, temp_audio_path, temp_dir),
+        args=(job_id, temp_audio_path, temp_dir, language, locale),
         daemon=True,
     )
     thread.start()
@@ -100,11 +99,18 @@ def get_transcription_job(job_id, user_id):
     return get_job(job_id, user_id)
 
 
-def _run_transcription_job(job_id, temp_audio_path, temp_dir):
+def _run_transcription_job(job_id, temp_audio_path, temp_dir, language=None, locale=None):
     try:
         update_job(job_id, status="processing")
-        transcript = transcribe_audio_path(temp_audio_path)
-        update_job(job_id, status="complete", transcript=transcript)
+        result = stt.transcribe(temp_audio_path, language=language, locale=locale)
+        # Recording which provider ran is the difference between diagnosing a bad
+        # transcript and guessing at it.
+        update_job(
+            job_id,
+            status="complete",
+            transcript=result.to_text(),
+            provider=result.provider,
+        )
     except Exception as e:
         logger.error(f"Transcription job {job_id} failed: {e}")
         logger.error(traceback.format_exc())
@@ -120,15 +126,6 @@ def _get_openai_client():
             raise ValueError("OPENAI_API_KEY is not set in .env")
         _openai_client = OpenAI(api_key=OPENAI_API_KEY)
     return _openai_client
-
-
-def _get_sarvam_client():
-    global _sarvam_client
-    if _sarvam_client is None:
-        if not SARVAM_API_KEY:
-            raise ValueError("SARVAM_API_KEY is not set in .env")
-        _sarvam_client = SarvamAI(api_subscription_key=SARVAM_API_KEY)
-    return _sarvam_client
 
 
 def generate_text(prompt):
@@ -189,99 +186,10 @@ def generate_rewrite(config, transcript: str) -> str:
         return "Error generating rewrite"
 
 
-def transcribe_audio_file(file):
-    temp_dir = "temp"
-    out_dir = os.path.join(temp_dir, "out")
-    os.makedirs(out_dir, exist_ok=True)
-    temp_audio_path = os.path.join(temp_dir, file.filename or "audio.m4a")
-    with open(temp_audio_path, "wb") as f:
-        shutil.copyfileobj(file.stream, f)
-    try:
-        return transcribe_audio_path(temp_audio_path)
-    finally:
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
+def transcribe_audio_path(temp_audio_path, language=None, locale=None):
+    """Transcribes a local file synchronously. Prefer the job API for requests.
 
-
-def transcribe_audio_path(temp_audio_path):
-    logger.info("🎤 Sarvam transcription with English output start")
-
-    temp_dir = os.path.dirname(temp_audio_path)
-    out_dir = os.path.join(temp_dir, "out")
-
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-
-        job = _get_sarvam_client().speech_to_text_job.create_job(
-            model="saarika:v2.5",
-            with_diarization=True
-        )
-
-        job.upload_files([temp_audio_path])
-        job.start()
-        job.wait_until_complete()
-
-        if job.is_failed():
-            raise TranscriptionError("The transcription provider rejected this recording.")
-
-        job.download_outputs(out_dir)
-
-        json_files = glob.glob(os.path.join(out_dir, "*.json"))
-        if not json_files:
-            raise TranscriptionError("No transcript was produced for this recording.")
-
-        with open(json_files[0], "r", encoding="utf-8") as jf:
-            res = json.load(jf)
-
-        entries = res.get("diarized_transcript", {}).get("entries", [])
-        if not entries:
-            # fallback if diarization not available
-            txt = res.get("transcript", "")
-            return txt.strip()
-
-        formatted_lines = []
-        for e in entries:
-            speaker = e.get("speaker_id", "Speaker").replace("_", " ").title()
-
-            # 1️⃣ Try English transliteration (Hinglish)
-            english_text = (
-                e.get("transcription_output", {})
-                .get("transcriptions", {})
-                .get("hi-IN", {})
-                .get("transliteration", {})
-                .get("en", {})
-                .get("text", "")
-            )
-
-            # 2️⃣ Try if there’s already an English transcription
-            if not english_text:
-                english_text = (
-                    e.get("transcription_output", {})
-                    .get("transcriptions", {})
-                    .get("en-IN", {})
-                    .get("text", "")
-                )
-
-            # 3️⃣ Fallback to original transcript if all else fails
-            if not english_text:
-                english_text = e.get("transcript", "")
-
-            formatted_lines.append(f"Speaker {speaker}: {english_text}")
-
-        final_text = "\n".join(formatted_lines).strip()
-        return final_text
-
-    except TranscriptionError:
-        raise
-
-    except Exception as e:
-        # Raise rather than returning a sentinel string: the caller records job
-        # state, and a returned message would be saved as the user's transcript.
-        logger.error(f"Sarvam Error: {e}")
-        logger.error(traceback.format_exc())
-        raise TranscriptionError("Transcription failed. Please try again.") from e
-
-    finally:
-        out_only = os.path.join(os.path.dirname(temp_audio_path), "out")
-        if os.path.exists(out_only):
-            shutil.rmtree(out_only, ignore_errors=True)
+    Raises TranscriptionError rather than returning a sentinel string: callers
+    record job state, and a returned message would be saved as the transcript.
+    """
+    return stt.transcribe(temp_audio_path, language=language, locale=locale).to_text()

@@ -49,11 +49,15 @@ def _endpoint() -> str:
     return f"{SUPABASE_URL}/rest/v1/{_TABLE}"
 
 
-def create_job(user_id: str) -> str:
+def create_job(user_id: str, requested_language: str | None = None) -> str:
+    payload = {"user_id": user_id, "status": "pending"}
+    if requested_language:
+        payload["requested_language"] = requested_language
+
     response = httpx.post(
         _endpoint(),
         headers=_headers({"Prefer": "return=representation"}),
-        json={"user_id": user_id, "status": "pending"},
+        json=payload,
         timeout=_TIMEOUT,
     )
     if response.status_code not in (200, 201):

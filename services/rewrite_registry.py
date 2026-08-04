@@ -6,7 +6,8 @@ Rules:
 - If information is missing for a section, omit that section — never guess.
 - Preserve speaker names and numbers exactly when mentioned.
 - Output ONLY the final document. No intro sentence, no "Here is your...".
-- The transcript may be in English or Hinglish. Output in English."""
+- The transcript may be in any language or script, including code-mixed speech
+  such as Hinglish. Translate as needed and always output in English."""
 
 
 @dataclass

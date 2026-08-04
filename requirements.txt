@@ -1,6 +1,8 @@
 Flask
+Flask-Limiter
 python-dotenv
 openai>=1.0.0
 sarvamai
 httpx
 gunicorn
+sentry-sdk[flask]

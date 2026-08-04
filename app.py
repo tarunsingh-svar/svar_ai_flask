@@ -1,5 +1,12 @@
+import logging
+import os
+import traceback
+
 from flask import Flask, g, request, jsonify
 from dotenv import load_dotenv
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
 from services.ai_service import (
     generate_text,
     generate_rewrite,
@@ -8,17 +15,20 @@ from services.ai_service import (
     get_transcription_job,
 )
 from services.auth import authenticate_request
+from services.observability import init_sentry
 from services.rewrite_registry import REWRITE_CONFIGS
-import logging
-import traceback
 
 load_dotenv()
 
+# DEBUG here is far too chatty for a deployed service and risks putting request
+# details in the log aggregator. Override with LOG_LEVEL=DEBUG when debugging.
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=getattr(logging, (os.getenv("LOG_LEVEL") or "INFO").upper(), logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("FlaskApp")
+
+init_sentry()
 
 app = Flask(__name__)
 
@@ -36,7 +46,28 @@ def enforce_authentication():
     return authenticate_request()
 
 
+def _rate_limit_key():
+    """Bucket per Supabase account, falling back to IP before auth has run."""
+    return getattr(g, "user_id", None) or get_remote_address()
+
+
+# Registered after the auth hook so `g.user_id` is already populated, which
+# keeps limits per-account instead of lumping everyone behind one NAT together.
+#
+# Counters live in process memory, and the Procfile runs 2 gunicorn workers, so
+# real-world limits are up to 2x those below. That is accurate enough to stop a
+# runaway or hostile client draining OpenAI and Sarvam credits; swap in Redis
+# via storage_uri if exact limits start to matter.
+limiter = Limiter(
+    key_func=_rate_limit_key,
+    app=app,
+    default_limits=["240 per hour", "30 per minute"],
+    storage_uri="memory://",
+)
+
+
 @app.route("/", methods=["GET"])
+@limiter.exempt
 def home():
     """Unauthenticated health check. Clients ping this to wake the dyno."""
     return "✅ Flask AI API Running!"
@@ -59,13 +90,19 @@ def summarize_text():
 
 
 @app.route("/transcribe", methods=["POST"])
+@limiter.limit("20 per hour; 5 per minute")
 def transcribe_audio():
     """Multipart upload path, used by the mobile app."""
     if "file" not in request.files:
         return jsonify({"error": "file missing"}), 400
 
     try:
-        job_id = create_transcription_job(g.user_id, request.files["file"])
+        job_id = create_transcription_job(
+            g.user_id,
+            request.files["file"],
+            language=request.form.get("language"),
+            locale=request.form.get("locale"),
+        )
         return jsonify({"job_id": job_id, "status": "pending"}), 202
     except Exception as e:
         logger.error(f"Failed to start transcription job: {e}")
@@ -74,6 +111,7 @@ def transcribe_audio():
 
 
 @app.route("/transcribe_url", methods=["POST"])
+@limiter.limit("20 per hour; 5 per minute")
 def transcribe_audio_url():
     """Storage-object path, used by the web app.
 
@@ -87,7 +125,12 @@ def transcribe_audio_url():
         return jsonify({"error": "audio_url missing or not https"}), 400
 
     try:
-        job_id = create_transcription_job_from_url(g.user_id, audio_url)
+        job_id = create_transcription_job_from_url(
+            g.user_id,
+            audio_url,
+            language=body.get("language"),
+            locale=body.get("locale"),
+        )
         return jsonify({"job_id": job_id, "status": "pending"}), 202
     except Exception as e:
         logger.error(f"Failed to start transcription job from url: {e}")
@@ -96,6 +139,9 @@ def transcribe_audio_url():
 
 
 @app.route("/transcribe/status/<job_id>", methods=["GET"])
+# Clients poll this every 2s for up to 15 minutes, so it must sit outside the
+# default limits or a single normal transcription would rate-limit itself.
+@limiter.exempt
 def transcribe_status(job_id):
     try:
         job = get_transcription_job(job_id, g.user_id)
